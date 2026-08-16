@@ -4,7 +4,16 @@
 
 Every coding agent today is Python or Node. Libcage runs where those can't —
 air-gapped CI, embedded boxes, minimal containers, bare metal with no venv.
-A single static binary, libc + POSIX sockets only.
+A single static binary, libc + POSIX sockets only. ~21KB, zero dependencies.
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Hardonian/libcage/main/install.sh | sh
+```
+
+Builds from source or pulls the latest release binary for `linux-amd64` /
+`macos-amd64` into `~/.local/bin`.
 
 ## What it does
 
@@ -18,10 +27,11 @@ A single static binary, libc + POSIX sockets only.
 
 ```sh
 make            # cc -O2 -std=c11 -o libcage agent.c  (no -l flags)
-make test       # self-repair self-test against a broken C file via local Ollama
+make test       # self-repair self-test (asserts the agent produces a working binary)
 ```
 
-Binary is ~21KB, dynamically linked only against libc.
+`make test` is the CI gate: it repairs a deliberately broken C file via local
+Ollama (if present) and fails the build if the result does not compile + run.
 
 ## Usage
 
@@ -44,12 +54,53 @@ libcage "Fix the off-by-one in parse()" broken.c \
 Works against OpenAI, Ollama, or any `/v1/chat/completions` endpoint — including
 a self-hosted inference lane on an EPYC GPU box.
 
+## Tiers
+
+| Tier | Price | Features |
+|------|-------|----------|
+| **Libcage** | $29 (one-time) | Autonomous repair loop. No license needed. |
+| **Libcage Pro** | $99 (one-time) | `+ --sbom` (CycloneDX SBOM) + `--policy` (endpoint allowlist). License-gated. |
+| **Libcage Team** | $299 (5-seat pack) | Pro + `--team N` (seats) + `--audit-log` (HMAC-chained tamper-evident log). License-gated. |
+
+Pro/Team features unlock with `--pro <license_file>` (any non-empty license key
+delivered after purchase).
+
+### Pro example
+
+```sh
+libcage --pro license.key --sbom agent.c
+libcage --pro license.key --policy policy.json "fix the parser" broken.c "cc -o out broken.c"
+```
+
+### Team example
+
+```sh
+libcage --pro team.key --team 5 --audit-log /var/log/libcage.audit \
+  --policy policy.json "fix the parser" broken.c "cc -o out broken.c"
+# /var/log/libcage.audit:
+# 0f0da2ad... {"t":"...","e":{"action":"session_start","seats":5}}
+# 9b1c...    {"t":"...","e":{"action":"repair_success","target":"broken.c","iter":1,"seats":5}}
+```
+
 ## Why pure C
 
 - **No supply chain.** One file, auditable by eye. No npm/pip transitive CVEs.
 - **Portable.** `cc -O2 -std=c11` on Linux, macOS, BSD, minimal containers.
 - **Future-proof.** C outlives language trends.
 
+## Release process
+
+Tag a version to ship:
+
+```sh
+git tag v0.1.0 && git push --tags
+```
+
+GitHub Actions builds `linux-amd64` + `macos-amd64` static binaries and
+publishes a GitHub Release automatically. See `.github/workflows/release.yml`.
+
 ## License
 
-See product terms. Source is provided for audit and modification.
+Free tier: autonomous repair (source provided for audit/modification).
+Pro/Team: commercial license delivered on purchase. See product terms at
+[aiautomatedsystems.ca/p/libcage](https://aiautomatedsystems.ca/p/libcage).
