@@ -54,6 +54,27 @@ libcage "Fix the off-by-one in parse()" broken.c \
 Works against OpenAI, Ollama, or any `/v1/chat/completions` endpoint — including
 a self-hosted inference lane on an EPYC GPU box.
 
+## Demo
+
+Recorded self-repair session (libcage fixes a broken file via local Ollama, then
+it compiles + runs):
+
+- Cast file: [`demo.cast`](demo.cast) — play with `asciinema play demo.cast`
+- Watch online: paste `demo.cast` into https://asciinema.org/ or self-host the player.
+
+Quick text recap:
+
+```
+$ printf '#include <stdio.h>\nint main(){ printf("hello\n"; return 0; }\n' > broken.c
+$ libcage "Fix the syntax error so this compiles and prints hello" broken.c \
+    "cc -o broken_out broken.c" "./broken_out"
+libcage: iteration 1/5
+libcage: compiling...
+libcage: testing...
+hello
+libcage: SUCCESS after 1 iteration(s)
+```
+
 ## Tiers
 
 | Tier | Price | Features |

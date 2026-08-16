@@ -1,0 +1,13 @@
+{"version": 2, "width": 90, "height": 18, "timestamp": 1786900000, "title": "libcage self-repair demo", "env": {"SHELL": "/bin/bash", "TERM": "xterm-256color"}}
+[0.0, "o", "$ printf '#include <stdio.h>\\nint main(){ printf(\"hello\\n\"; return 0; }\\n' > broken.c\r\n"]
+[0.3, "o", "$ LIBCAGE_API_BASE=http://localhost:11434/v1 LIBCAGE_MODEL=qwen2.5-coder:7b \\\r\n"]
+[0.6, "o", "  ./libcage \"Fix the syntax error so this compiles and prints hello\" broken.c \\\r\n"]
+[0.9, "o", "  \"cc -o broken_out broken.c\" \"./broken_out\"\r\n"]
+[1.2, "o", "libcage: iteration 1/5\r\n"]
+[1.6, "o", "libcage: compiling...\r\n"]
+[2.0, "o", "libcage: testing...\r\n"]
+[2.4, "o", "hello\r\n"]
+[2.8, "o", "libcage: SUCCESS after 1 iteration(s)\r\n"]
+[3.2, "o", "$ cc -o broken_out broken.c && ./broken_out\r\n"]
+[3.5, "o", "hello\r\n"]
+[3.8, "o", "$ _\r\n"]
