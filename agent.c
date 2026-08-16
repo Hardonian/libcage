@@ -361,18 +361,163 @@ static int run_cmd(const char *cmd){
     return r;
 }
 
+/* ===================== LIBRAGE PRO (paid tier) =====================
+ * Features: SBOM generation, team policy enforcement (endpoint allowlist),
+ * and a license gate. All dependency-free, same zero-dep philosophy.
+ * Unlocked by `--pro <license_file>` where the file is non-empty.
+ * =================================================================== */
+
+/* Minimal SHA-256 (public-domain style, compact). Returns 0 on success. */
+static void sha256(const unsigned char *msg, size_t len, unsigned char out[32]){
+    static const unsigned K[64] = {
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+    unsigned H[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+    /* padded message */
+    size_t newlen = ((len + 8) / 64 + 1) * 64;
+    unsigned char *m = calloc(newlen, 1);
+    if(!m) return;
+    memcpy(m, msg, len);
+    m[len] = 0x80;
+    unsigned long long bits = (unsigned long long)len * 8;
+    for(int i=0;i<8;i++) m[newlen-1-i] = (unsigned char)(bits >> (i*8));
+    for(size_t off=0; off<newlen; off+=64){
+        unsigned w[64];
+        for(int i=0;i<16;i++) w[i] = (m[off+i*4]<<24)|(m[off+i*4+1]<<16)|(m[off+i*4+2]<<8)|m[off+i*4+3];
+        for(int i=16;i<64;i++){
+            unsigned s0 = (w[i-15]>>2|w[i-15]<<30)^(w[i-15]>>13|w[i-15]<<19)^(w[i-15]>>22);
+            unsigned s1 = (w[i-2]>>6|w[i-2]<<26)^(w[i-2]>>11|w[i-2]<<21)^(w[i-2]>>25);
+            w[i] = w[i-16] + s0 + w[i-7] + s1;
+        }
+        unsigned a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+        for(int i=0;i<64;i++){
+            unsigned S1=(e>>6|e<<26)^(e>>11|e<<21)^(e>>25); unsigned ch=(e&f)^((~e)&g);
+            unsigned t=h+S1+ch+K[i]+w[i]; unsigned S0=(a>>2|a<<30)^(a>>13|a<<19)^(a>>22);
+            unsigned maj=(a&b)^(a&c)^(b&c); unsigned t2=S0+maj;
+            h=g;g=f;f=e;e=d+t;d=c;c=b;b=a;a=t+t2;
+        }
+        H[0]+=a;H[1]+=b;H[2]+=c;H[3]+=d;H[4]+=e;H[5]+=f;H[6]+=g;H[7]+=h;
+    }
+    for(int i=0;i<8;i++){ out[i*4]=(H[i]>>24)&0xff; out[i*4+1]=(H[i]>>16)&0xff; out[i*4+2]=(H[i]>>8)&0xff; out[i*4+3]=H[i]&0xff; }
+    free(m);
+}
+
+/* SBOM: CycloneDX-lite JSON. Reports compiler + source hash + zero deps. */
+static int cmd_sbom(const char *target){
+    /* compiler version */
+    Str cv; str_init(&cv);
+    FILE *pp = popen("cc --version 2>/dev/null", "r");
+    if(pp){ char b[512]; if(fgets(b,sizeof b,pp)) str_puts(&cv,b); pclose(pp); }
+    /* sha256 of target */
+    FILE *f = fopen(target,"rb");
+    unsigned char hash[32]; memset(hash,0,32);
+    if(f){
+        fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
+        unsigned char *buf = malloc(sz>0?sz:1);
+        if(buf){ (void)fread(buf,1,(size_t)sz,f); sha256(buf,(size_t)sz,hash); free(buf); }
+        fclose(f);
+    }
+    char hex[65]; for(int i=0;i<32;i++) snprintf(hex+i*2,3,"%02x",hash[i]);
+    printf("{\n");
+    printf("  \"bomFormat\": \"CycloneDX\", \"specVersion\": \"1.5\", \"version\": 1,\n");
+    printf("  \"metadata\": {\"component\": {\"type\":\"application\",\"name\":\"libcage\",\"version\":\"%s\"}},\n", LIBCAGE_VERSION);
+    printf("  \"components\": [\n");
+    printf("    {\"type\":\"library\",\"name\":\"libc (host)\",\"version\":%.*s,\"hashes\":[{\"alg\":\"SHA-256\",\"content\":\"%s\"}],\"scope\":\"required\"},\n",
+           (int)strcspn(cv.p,"\n"), cv.p, hex);
+    printf("    {\"type\":\"file\",\"name\":\"%s\",\"hashes\":[{\"alg\":\"SHA-256\",\"content\":\"%s\"}]}\n", target, hex);
+    printf("  ],\n");
+    printf("  \"dependencies\": [{\"ref\":\"libcage\",\"dependsOn\":[\"libc (host)\"]}]\n");
+    printf("}\n");
+    free(cv.p);
+    return 0;
+}
+
+/* Policy: JSON with "allowed_endpoints": ["https://...", ...]. Refuse if host
+   not in list. Minimal JSON parse (only reads that one array). */
+static int policy_allows(const char *policyfile, const char *host){
+    FILE *f = fopen(policyfile,"r");
+    if(!f) return 0;
+    Str js; str_init(&js);
+    char b[4096]; while(fgets(b,sizeof b,f)) str_puts(&js,b);
+    fclose(f);
+    /* find "allowed_endpoints" then collect "https://host..." entries */
+    const char *p = strstr(js.p, "\"allowed_endpoints\"");
+    if(!p){ free(js.p); return 0; }
+    int ok=0;
+    const char *q = strchr(p,'[');
+    if(!q){ free(js.p); return 0; }
+    /* scan string literals in the array until matching ']' at depth 0 */
+    const char *s = q;
+    while(*s && *s!=']'){
+        if(*s=='"'){
+            s++;
+            Str lit; str_init(&lit);
+            while(*s && *s!='"'){ str_append(&lit,s,1); s++; }
+            if(*s=='"') s++;
+            if(strstr(lit.p, host)) ok=1;
+            free(lit.p);
+        } else s++;
+    }
+    free(js.p);
+    return ok;
+}
+
+static int is_pro(const char *licfile){
+    if(!licfile) return 0;
+    FILE *f = fopen(licfile,"r");
+    if(!f) return 0;
+    char b[256]; size_t n = fread(b,1,sizeof b-1,f); fclose(f);
+    /* non-empty (after trimming) license => pro unlocked */
+    for(size_t i=0;i<n;i++) if(!isspace((unsigned char)b[i])) return 1;
+    return 0;
+}
+
 static void usage(const char *me){
     fprintf(stderr,
         "libcage %s — pure-C LLM agent for autonomous code repair\n"
         "usage: %s <prompt> <target_file> [compile_cmd] [test_cmd]\n"
         "env: LIBCAGE_API_BASE (default http://localhost:11434/v1)\n"
         "     LIBCAGE_API_KEY (default ollama)  LIBCAGE_MODEL (default qwen2.5-coder:7b)\n"
-        "     LIBCAGE_MAX_ITER (default 5)\n",
+        "     LIBCAGE_MAX_ITER (default 5)\n"
+        "PRO (--pro <license_file>): --sbom (CycloneDX SBOM)  --policy <file.json> (endpoint allowlist)\n",
         LIBCAGE_VERSION, me);
 }
 
 int main(int argc, char **argv){
     if(argc<3){ usage(argv[0]); return 2; }
+
+    /* Pro flags: --pro LICENSE, --sbom, --policy FILE. Parse before positional. */
+    const char *pro_lic = NULL;
+    const char *policy_file = NULL;
+    int want_sbom = 0;
+    for(int i=1;i<argc;i++){
+        if(strcmp(argv[i],"--pro")==0 && i+1<argc){ pro_lic=argv[++i]; }
+        else if(strcmp(argv[i],"--sbom")==0){ want_sbom=1; }
+        else if(strcmp(argv[i],"--policy")==0 && i+1<argc){ policy_file=argv[++i]; }
+    }
+    if(want_sbom){
+        if(!is_pro(pro_lic)){ fprintf(stderr,"libcage: --sbom requires --pro <license_file>\n"); return 2; }
+        /* target = first positional arg (not a flag or flag-value) */
+        const char *sbom_target = NULL;
+        for(int i=1;i<argc;i++){
+            if(strcmp(argv[i],"--pro")==0){ i++; continue; }
+            if(strcmp(argv[i],"--sbom")==0) continue;
+            if(strcmp(argv[i],"--policy")==0){ i++; continue; }
+            sbom_target = argv[i]; break;
+        }
+        if(!sbom_target){ fprintf(stderr,"libcage: --sbom requires a target file\n"); return 2; }
+        return cmd_sbom(sbom_target);
+    }
+    if(policy_file && !is_pro(pro_lic)){
+        fprintf(stderr,"libcage: --policy requires --pro <license_file>\n"); return 2;
+    }
+
     const char *prompt = argv[1];
     const char *target = argv[2];
     const char *compile = argc>3? argv[3] : "cc -o /tmp/libcage_out TARGET";
@@ -449,6 +594,13 @@ int main(int argc, char **argv){
 
         Str resp; str_init(&resp);
         char urlpath[600]; snprintf(urlpath,sizeof urlpath,"%s/chat/completions", path);
+        /* Pro policy enforcement: refuse endpoints not in the allowlist */
+        if(policy_file && !policy_allows(policy_file, host)){
+            fprintf(stderr,"libcage: endpoint %s not allowed by policy %s\n", host, policy_file);
+            free(body.p); free(resp.p);
+            return 1;
+        }
+
         if(http_post(host, port, urlpath, body.p, api_key, &resp)!=0){
             fprintf(stderr,"libcage: HTTP request failed\n");
             free(body.p); free(resp.p);
