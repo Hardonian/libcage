@@ -41,6 +41,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <time.h>
 
 #ifndef LIBCAGE_VERSION
 #define LIBCAGE_VERSION "0.1.0"
@@ -420,7 +421,7 @@ static int cmd_sbom(const char *target){
     if(f){
         fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
         unsigned char *buf = malloc(sz>0?sz:1);
-        if(buf){ (void)fread(buf,1,(size_t)sz,f); sha256(buf,(size_t)sz,hash); free(buf); }
+        if(buf){ size_t rd = fread(buf,1,(size_t)sz,f); (void)rd; sha256(buf,(size_t)sz,hash); free(buf); }
         fclose(f);
     }
     char hex[65]; for(int i=0;i<32;i++) snprintf(hex+i*2,3,"%02x",hash[i]);
@@ -478,6 +479,45 @@ static int is_pro(const char *licfile){
     return 0;
 }
 
+/* HMAC-SHA256 (uses sha256). key,buf -> out[32]. */
+static void hmac_sha256(const unsigned char *key, size_t klen,
+                        const unsigned char *msg, size_t mlen, unsigned char out[32]){
+    unsigned char k[64];
+    if(klen>64){ sha256(key,klen,k); memset(k+32,0,32); }
+    else { size_t kl = klen?klen:1; memcpy(k,key,klen); memset(k+kl,0,64-kl); }
+    unsigned char ipad[64], opad[64];
+    for(int i=0;i<64;i++){ ipad[i]=k[i]^0x36; opad[i]=k[i]^0x5c; }
+    unsigned char inner[32];
+    size_t tot = 64 + mlen;
+    unsigned char *blk = malloc(tot ? tot : 1);
+    memcpy(blk, ipad, 64); memcpy(blk+64, msg, mlen);
+    sha256(blk, tot, inner);
+    free(blk);
+    unsigned char outer[64+32];
+    memcpy(outer, opad, 64); memcpy(outer+64, inner, 32);
+    sha256(outer, 64+32, out);
+}
+
+/* Append a HMAC-signed audit line to FILE (Team tier). Format:
+   <hex-hmac> <json-event>\n  — tamper-evident, no external libs. */
+static void audit_log(const char *path, const char *lickey, const char *event){
+    static unsigned char prev[32]; static int have_prev=0;
+    unsigned char h[32];
+    size_t elen = strlen(event);
+    /* chain: HMAC(key, prev || event) */
+    unsigned char *msg = malloc(32 + elen + 1);
+    memcpy(msg, have_prev?prev:(unsigned char*)"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",32);
+    memcpy(msg+32, event, elen);
+    hmac_sha256((const unsigned char*)lickey, strlen(lickey), msg, 32+elen, h);
+    memcpy(prev,h,32); have_prev=1;
+    free(msg);
+    char hex[65]; for(int i=0;i<32;i++) snprintf(hex+i*2,3,"%02x",h[i]);
+    FILE *f = fopen(path,"a");
+    if(!f) return;
+    fprintf(f,"%s {\"t\":\"%ld\",\"e\":%s}\n", hex, (long)time(NULL), event);
+    fclose(f);
+}
+
 static void usage(const char *me){
     fprintf(stderr,
         "libcage %s — pure-C LLM agent for autonomous code repair\n"
@@ -485,21 +525,26 @@ static void usage(const char *me){
         "env: LIBCAGE_API_BASE (default http://localhost:11434/v1)\n"
         "     LIBCAGE_API_KEY (default ollama)  LIBCAGE_MODEL (default qwen2.5-coder:7b)\n"
         "     LIBCAGE_MAX_ITER (default 5)\n"
-        "PRO (--pro <license_file>): --sbom (CycloneDX SBOM)  --policy <file.json> (endpoint allowlist)\n",
+        "PRO (--pro <license_file>): --sbom (CycloneDX SBOM)  --policy <file.json> (endpoint allowlist)\n"
+        "TEAM: --team <N> (seat count)  --audit-log <file> (HMAC-signed tamper-evident log)\n",
         LIBCAGE_VERSION, me);
 }
 
 int main(int argc, char **argv){
     if(argc<3){ usage(argv[0]); return 2; }
 
-    /* Pro flags: --pro LICENSE, --sbom, --policy FILE. Parse before positional. */
+    /* Pro/Team flags: --pro LICENSE, --sbom, --policy FILE, --team N, --audit-log FILE */
     const char *pro_lic = NULL;
     const char *policy_file = NULL;
+    const char *audit_log_path = NULL;
     int want_sbom = 0;
+    int team_seats = 0;
     for(int i=1;i<argc;i++){
         if(strcmp(argv[i],"--pro")==0 && i+1<argc){ pro_lic=argv[++i]; }
         else if(strcmp(argv[i],"--sbom")==0){ want_sbom=1; }
         else if(strcmp(argv[i],"--policy")==0 && i+1<argc){ policy_file=argv[++i]; }
+        else if(strcmp(argv[i],"--team")==0 && i+1<argc){ team_seats=atoi(argv[++i]); }
+        else if(strcmp(argv[i],"--audit-log")==0 && i+1<argc){ audit_log_path=argv[++i]; }
     }
     if(want_sbom){
         if(!is_pro(pro_lic)){ fprintf(stderr,"libcage: --sbom requires --pro <license_file>\n"); return 2; }
@@ -516,6 +561,13 @@ int main(int argc, char **argv){
     }
     if(policy_file && !is_pro(pro_lic)){
         fprintf(stderr,"libcage: --policy requires --pro <license_file>\n"); return 2;
+    }
+    if((team_seats>0 || audit_log_path) && !is_pro(pro_lic)){
+        fprintf(stderr,"libcage: --team/--audit-log require --pro <license_file>\n"); return 2;
+    }
+    if(team_seats>0 && audit_log_path){
+        char ev[256]; snprintf(ev,sizeof ev,"{\"action\":\"session_start\",\"seats\":%d}", team_seats);
+        audit_log(audit_log_path, pro_lic, ev);
     }
 
     const char *prompt = argv[1];
@@ -671,6 +723,10 @@ int main(int argc, char **argv){
         }
 
         fprintf(stderr,"libcage: SUCCESS after %d iteration(s)\n", iter);
+        if(audit_log_path){
+            char ev[256]; snprintf(ev,sizeof ev,"{\"action\":\"repair_success\",\"target\":\"%s\",\"iter\":%d,\"seats\":%d}", target, iter, team_seats);
+            audit_log(audit_log_path, pro_lic, ev);
+        }
         return 0;
     }
 

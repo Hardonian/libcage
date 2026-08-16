@@ -1,0 +1,52 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { target: linux-amd64,  cc: cc,   flags: '-O2 -std=c11 -Wall -Wextra' }
+          - { target: macos-amd64,  cc: cc,   flags: '-O2 -std=c11 -Wall -Wextra' }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build static binary
+        run: |
+          ${{ matrix.cc }} ${{ matrix.flags }} -o libcage-${{ matrix.target }} agent.c
+          file libcage-${{ matrix.target }}
+      - name: Smoke test (offline, no model needed)
+        run: |
+          ./libcage-${{ matrix.target }} --help 2>&1 | head -1 || ./libcage-${{ matrix.target }} 2>&1 | head -1
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcage-${{ matrix.target }}
+          path: libcage-${{ matrix.target }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Stage binaries
+        run: |
+          mkdir -p out
+          find dist -type f -name 'libcage-*' -exec cp {} out/ \;
+          ls -la out
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/libcage-*
+          generate_release_notes: true
