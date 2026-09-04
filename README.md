@@ -1,5 +1,9 @@
 # Libcage
 
+<!-- BEGIN: REPO HERO -->
+![libcage — hero generated locally on the GPU stack](assets/repo-hero.png)
+<!-- END: REPO HERO -->
+
 **A zero-dependency pure-C LLM agent runtime for autonomous code repair.**
 
 Every coding agent today is Python or Node. Libcage runs where those can't —
